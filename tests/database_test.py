@@ -1,31 +1,34 @@
-# Configuration du chemin pour importer les modules src
 import sys
 import os
-# Ajoute le répertoire parent au chemin Python pour résoudre les imports
+
+# Ajoute le dossier racine au path pour permettre les imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import de la classe Database depuis le module database
-from src.common.database import Database
+from src.common.database import DatabaseManager
+from src.common.crypto import RSAEncryption
 
 def test_database():
-    """Test de création et connexion à la base de données"""
-    # Création d'une instance Database
-    db = Database()
-    
-    # Création de la base de données et des tables
-    if db.create_database():
-        # Tentative de connexion à la base créée
-        connection = db.connect()
-        if connection:
-            print("✅ Base de données créée et connectée avec succès")
-            # Fermeture propre de la connexion
-            connection.close()
-        else:
-            print("❌ Erreur de connexion après création")
-    else:
-        print("❌ Erreur lors de la création de la base")
+    print("\n===== TEST BDD - DÉBUT =====")
 
-# Point d'entrée du programme de test
+    # Connexion à la base
+    db = DatabaseManager(user="root", password="1234")
+
+    # Génération d'une clé RSA de test
+    rsa = RSAEncryption()
+    public_key, _ = rsa.generate_keys()
+
+    # Ajout d'un routeur
+    db.add_router("Routeur1", "127.0.0.1", 8001, public_key)
+
+    # Récupération des routeurs
+    routers = db.get_routers()
+    print("Routeurs trouvés :", routers)
+
+    # Ajout d'un log
+    db.add_log("Test d'insertion de log OK.")
+
+    print("✔ TEST RÉUSSI - Tout fonctionne.")
+    print("===== TEST BDD - FIN =====\n")
+
 if __name__ == "__main__":
-    # Lancement du test complet de la base de données
     test_database()
