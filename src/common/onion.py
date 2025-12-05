@@ -1,93 +1,114 @@
-# Import des modules nécessaires
 from .crypto import RSAEncryption
 
 class OnionRouter:
-    """Gère le routage en oignon avec chiffrement par couches"""
+    """
+    Routage en oignon pédagogique pour la SAE.
+    Chaque couche contient :
     
+        next_hop | liste_chiffree
+    
+    où la liste est une suite d'entiers séparés par des virgules.
+    """
+
     def __init__(self):
         self.crypto = RSAEncryption()
-    
+
+    # ============================================================
+    #   CRÉATION DU MESSAGE EN OIGNON (CÔTÉ CLIENT)
+    # ============================================================
     def create_onion_message(self, message, destination, router_chain, router_public_keys):
         """
-        Crée un message en oignon avec plusieurs couches de chiffrement
-        
-        Args:
-            message: le message à envoyer
-            destination: le client destinataire
-            router_chain: liste des routeurs [R1, R2, R3]
-            router_public_keys: dictionnaire {routeur: clé_publique}
+        Construit le message en oignon final qui sera envoyé au premier routeur.
+
+        message : "A"
+        destination : "B"
+        router_chain : ["router1", "router2", "router3"]
+        router_public_keys : dict {"router1": (e,n), ...}
+
+        Retourne : texte contenant la première couche.
         """
-        # Commencer par la dernière couche (destination + message)
-        current_payload = f"{destination}|{message}"
-        print(f"Payload initial: {current_payload}")
-        
-        # Convertir en nombre pour le chiffrement
-        current_payload_num = self._text_to_number(current_payload)
-        print(f"Payload en nombre: {current_payload_num}")
-        
-        # Parcourir les routeurs à l'envers (de R3 à R1)
+
+        # Dernière couche : destination + message
+        final_payload = f"{destination}|{message}"
+
+        # On convertit ce texte en liste RSA chiffrée pour le dernier routeur
+        current_layer = None
+
+        # Construction de l’oignon de l'intérieur vers l'extérieur
         for router in reversed(router_chain):
-            # Récupérer la clé publique du routeur
-            public_key = router_public_keys[router]
-            
-            # Créer la charge utile pour ce routeur
-            if router != router_chain[-1]:  # Pas le dernier routeur
+
+            pub_key = router_public_keys[router]
+
+            # Si aucune couche interne → dernière couche : B|A
+            if current_layer is None:
+                data = final_payload
+            else:
+                # data = "next_router|liste_chiffree"
                 next_router = router_chain[router_chain.index(router) + 1]
-                payload_text = f"{next_router}|{self._number_to_text(current_payload_num)}"
-            else:  # Dernier routeur
-                payload_text = self._number_to_text(current_payload_num)
-            
-            # Convertir en nombre et chiffrer
-            payload_num = self._text_to_number(payload_text)
-            current_payload_num = self.crypto.encrypt_number(payload_num, public_key)
-            print(f"Couche {router} chiffrée: {current_payload_num}")
-        
-        return str(current_payload_num)
-    
-    def process_onion_layer(self, encrypted_layer, private_key):
+                data = f"{next_router}|{current_layer}"
+
+            # Chiffrement caractère par caractère → liste d'entiers
+            encrypted_list = self._encrypt_layer(data, pub_key)
+
+            # On encode la liste sous forme de string : "12,421,54,..."
+            current_layer = ",".join(map(str, encrypted_list))
+
+        return current_layer
+
+    # ============================================================
+    #   TRAITEMENT D'UNE COUCHE (CÔTÉ ROUTEUR)
+    # ============================================================
+    def process_onion_layer(self, encrypted_layer_str, private_key):
         """
-        Traite une couche d'oignon (déchiffre et extrait le prochain saut)
-        
-        Args:
-            encrypted_layer: la couche chiffrée reçue
-            private_key: clé privée du routeur pour déchiffrer
-        
-        Returns:
-            tuple: (next_hop, remaining_payload) ou (destination, message)
+        Déchiffre UNE couche de l’oignon.
+
+        encrypted_layer_str : "123,456,789"
+        private_key : clé RSA du routeur
+
+        Retourne :
+            next_hop, remaining_payload
         """
-        # Vérifier si encrypted_layer est déjà un nombre ou du texte
-        if isinstance(encrypted_layer, str) and encrypted_layer.isdigit():
-            encrypted_num = int(encrypted_layer)
-        else:
-            # Si c'est du texte, le convertir en nombre
-            encrypted_num = self._text_to_number(encrypted_layer)
-        
-        decrypted_num = self.crypto.decrypt_number(encrypted_num, private_key)
-        decrypted_text = self._number_to_text(decrypted_num)
-        
-        print(f"Couche déchiffrée: {decrypted_text}")
-        
-        # Séparer le prochain saut du reste du payload
-        parts = decrypted_text.split('|', 1)
-        
+
+        # Convertir "12,45,8" -> [12,45,8]
+        encrypted_list = [int(x) for x in encrypted_layer_str.split(",")]
+
+        # Déchiffrement RSA → texte clair
+        decrypted_text = self._decrypt_layer(encrypted_list, private_key)
+
+        # Format attendu : next_hop|payload
+        parts = decrypted_text.split("|", 1)
+
         if len(parts) == 2:
-            next_hop, remaining_payload = parts
-            return next_hop, remaining_payload
-        else:
-            # Dernière couche : destination + message
-            return None, decrypted_text
-    
-    def _text_to_number(self, text):
-        """Convertit un texte en nombre"""
-        number = 0
-        for char in text:
-            number = number * 256 + ord(char)
-        return number
-    
-    def _number_to_text(self, number):
-        """Convertit un nombre en texte"""
-        text = ""
-        while number > 0:
-            text = chr(number % 256) + text
-            number //= 256
-        return text
+            return parts[0], parts[1]  # next_hop , couche suivante
+
+        # Dernière couche : "B|A"
+        return None, decrypted_text
+
+    # ============================================================
+    #   OUTILS INTERNE : chiffrement / déchiffrement d'une couche
+    # ============================================================
+    def _encrypt_layer(self, text, public_key):
+        """
+        Chiffre un texte caractère par caractère → renvoie une liste d'entiers.
+        """
+        e, n = public_key
+        encrypted = []
+
+        for c in text:
+            enc = pow(ord(c), e, n)
+            encrypted.append(enc)
+
+        return encrypted
+
+    def _decrypt_layer(self, encrypted_list, private_key):
+        """
+        Déchiffre la liste d'entiers RSA → reconstitue le texte clair.
+        """
+        d, n = private_key
+        out = ""
+
+        for enc in encrypted_list:
+            val = pow(enc, d, n)
+            out += chr(val)
+
+        return out
