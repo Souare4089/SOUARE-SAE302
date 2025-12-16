@@ -1,24 +1,21 @@
 import mariadb
 import sys
 
+
 class DatabaseManager:
     """
     Classe permettant de gérer toutes les opérations avec MariaDB.
-    Elle sera utilisée par le Master et éventuellement les routeurs.
+    Utilisée par le Master.
     """
 
-    def __init__(self, host="localhost", user="root", password="", database="onion_network"):
-        """
-        Initialise la connexion à la base MariaDB.
-        Si la base n'existe pas encore, elle est créée automatiquement.
-        """
+    def __init__(self, host="localhost", user="root", password="1234", database="onion_network"):
 
         self.host = host
         self.user = user
         self.password = password
         self.database = database
 
-        # D'abord essayer de se connecter à MariaDB sans sélectionner de base
+        # Connexion sans base pour la créer si besoin
         try:
             self.conn = mariadb.connect(
                 host=self.host,
@@ -27,13 +24,12 @@ class DatabaseManager:
             )
             self.cursor = self.conn.cursor()
         except mariadb.Error as e:
-            print(f"[ERREUR] Impossible de se connecter à MariaDB : {e}")
+            print(f"[ERREUR] Connexion MariaDB impossible : {e}")
             sys.exit(1)
 
-        # Créer la base si elle n'existe pas
         self._create_database()
 
-        # Se reconnecter mais cette fois-ci dans la bonne base
+        # Reconnexion avec la base sélectionnée
         try:
             self.conn = mariadb.connect(
                 host=self.host,
@@ -43,60 +39,64 @@ class DatabaseManager:
             )
             self.cursor = self.conn.cursor()
         except mariadb.Error as e:
-            print(f"[ERREUR] Impossible de sélectionner la base {self.database} : {e}")
+            print(f"[ERREUR] Sélection de la base impossible : {e}")
             sys.exit(1)
 
-        # Créer les tables nécessaires
         self._create_tables()
 
+    # ============================================================
+    # CRÉATION BASE + TABLES
+    # ============================================================
     def _create_database(self):
-        """Crée la base si elle n'existe pas."""
         try:
             self.cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
         except mariadb.Error as e:
-            print(f"[ERREUR] Impossible de créer la base {self.database} : {e}")
+            print(f"[ERREUR] Création base impossible : {e}")
             sys.exit(1)
 
     def _create_tables(self):
-        """Crée les tables nécessaires au projet."""
-        queries = [
+        try:
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS routers (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(50),
+                    ip VARCHAR(50),
+                    port INT,
+                    public_e LONGTEXT,
+                    public_n LONGTEXT
+                )
+            """)
 
-            # Table des routeurs
-            """
-            CREATE TABLE IF NOT EXISTS routers (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(50),
-                ip VARCHAR(50),
-                port INT,
-                public_e LONGTEXT,
-                public_n LONGTEXT
-            )
-            """,
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    message TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        except mariadb.Error as e:
+            print(f"[ERREUR] Création tables impossible : {e}")
 
-            # Table des logs
-            """
-            CREATE TABLE IF NOT EXISTS logs (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                message TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        ]
-
-        for query in queries:
-            try:
-                self.cursor.execute(query)
-            except mariadb.Error as e:
-                print(f"[ERREUR] Impossible de créer une table : {e}")
+    # ============================================================
+    # ROUTEURS
+    # ============================================================
+    def remove_router(self, name):
+        """
+        Supprime toutes les entrées d'un routeur par son nom.
+        Utilisé pour éviter les doublons.
+        """
+        try:
+            self.cursor.execute("DELETE FROM routers WHERE name = ?", (name,))
+            self.conn.commit()
+        except mariadb.Error as e:
+            print(f"[ERREUR] Suppression routeur impossible : {e}")
 
     def add_router(self, name, ip, port, public_key):
         """
-        Ajoute un routeur dans la base avec sa clé publique.
+        Ajoute un routeur dans la base.
         public_key = (e, n)
         """
-
         e, n = public_key
-
         try:
             self.cursor.execute(
                 "INSERT INTO routers (name, ip, port, public_e, public_n) VALUES (?, ?, ?, ?, ?)",
@@ -105,11 +105,11 @@ class DatabaseManager:
             self.conn.commit()
             print(f"[DB] Routeur {name} ajouté.")
         except mariadb.Error as e:
-            print(f"[ERREUR] Impossible d'ajouter un routeur : {e}")
+            print(f"[ERREUR] Ajout routeur impossible : {e}")
 
     def get_routers(self):
         """
-        Récupère la liste des routeurs sous forme de dictionnaires.
+        Retourne la liste des routeurs.
         """
         try:
             self.cursor.execute("SELECT name, ip, port, public_e, public_n FROM routers")
@@ -127,21 +127,19 @@ class DatabaseManager:
             return routers
 
         except mariadb.Error as e:
-            print(f"[ERREUR] Impossible de récupérer les routeurs : {e}")
+            print(f"[ERREUR] Récupération routeurs impossible : {e}")
             return []
 
+    # ============================================================
+    # LOGS
+    # ============================================================
     def add_log(self, message):
-        """
-        Ajoute un log dans la base.
-        Utile pour le Master (suivi du réseau).
-        """
         try:
             self.cursor.execute("INSERT INTO logs (message) VALUES (?)", (message,))
             self.conn.commit()
         except mariadb.Error as e:
-            print(f"[ERREUR] Impossible d'ajouter un log : {e}")
+            print(f"[ERREUR] Ajout log impossible : {e}")
 
     def close(self):
-        """Ferme proprement la connexion."""
         self.cursor.close()
         self.conn.close()
