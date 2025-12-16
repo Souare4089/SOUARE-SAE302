@@ -1,10 +1,14 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import socket
+import json
+import psutil
+import time
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.common.crypto import RSAEncryption
 from src.common.onion import OnionRouter
-import json
 
 
 MASTER_IP = "127.0.0.1"
@@ -26,22 +30,21 @@ class RouterServer:
         self.name = name
         self.host = host
         self.port = port
-        self.next_router = next_router  
+        self.next_router = next_router
 
-        # Génération des clés RSA du routeur
+        # Génération des clés RSA
         rsa = RSAEncryption()
         self.public_key, self.private_key = rsa.generate_keys()
 
         self.onion = OnionRouter()
 
-        # AJOUT SAÉ : enregistrement automatique
+        # Enregistrement automatique auprès du MASTER
         self.register_to_master()
 
     # ============================================================
     #     Enregistrement automatique auprès du MASTER
     # ============================================================
     def register_to_master(self):
-        """Envoie nom, ip, port, clé publique au MASTER."""
         try:
             data = {
                 "name": self.name,
@@ -62,12 +65,32 @@ class RouterServer:
             print(f"[ROUTER {self.name}] ❌ ERREUR REGISTER: {e}")
 
     # ============================================================
+    #         LIBÉRATION AUTOMATIQUE DU PORT (WINDOWS)
+    # ============================================================
+    def free_port(self):
+        """Libère le port si déjà utilisé (évite WinError 10048)."""
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                for conn in proc.net_connections(kind="inet"):
+                    if conn.laddr.port == self.port:
+                        print(f"[ROUTER {self.name}] ⚠ Port {self.port} occupé, arrêt PID {proc.pid}")
+                        proc.kill()
+                        time.sleep(1)
+                        return
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+    # ============================================================
     #                     DÉMARRAGE ROUTEUR
     # ============================================================
     def start(self):
         print(f"[ROUTER {self.name}] En écoute sur {self.host}:{self.port}")
 
+        # ⭐ libération automatique du port
+        self.free_port()
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind((self.host, self.port))
             server.listen()
 
@@ -83,7 +106,7 @@ class RouterServer:
 
                 print(f"[{self.name}] next_hop = {next_hop}")
 
-                # Dernier routeur → envoyer à ClientB
+                # Dernier routeur → Client B
                 if next_hop == "clientB":
                     print(f"[{self.name}] Envoi au destinataire final (clientB).")
                     self.send_to_clientB(payload)
@@ -91,7 +114,7 @@ class RouterServer:
                     conn.close()
                     continue
 
-                # Sinon → transmettre au routeur suivant
+                # Transmission au routeur suivant
                 result = self.forward_to_next(next_hop, payload)
                 conn.sendall(result.encode())
                 conn.close()
@@ -121,23 +144,18 @@ class RouterServer:
 
 
 # =================================================================
-#   LECTURE DES ARGUMENTS POUR LANCEMENT AUTOMATIQUE
+#   LANCEMENT AUTOMATIQUE PAR ARGUMENTS
 # =================================================================
 if __name__ == "__main__":
     """
     Utilisation :
         python router_server.py router1 127.0.0.1 8001
-        python router_server.py router3 127.0.0.1 8003 clientB
+        python router_server.py router3 127.0.0.1 8003
     """
 
     name = sys.argv[1]
     host = sys.argv[2]
     port = int(sys.argv[3])
 
-    if len(sys.argv) == 5 and sys.argv[4] == "clientB":
-        next_router = ("127.0.0.1", 9100)
-    else:
-        next_router = None
-
-    server = RouterServer(name, host, port, next_router)
+    server = RouterServer(name, host, port)
     server.start()
