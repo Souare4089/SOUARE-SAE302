@@ -1,15 +1,9 @@
 import sys
-import os
 import socket
 import json
 import psutil
-import time
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from src.common.crypto import RSAEncryption
 from src.common.onion import OnionRouter
-
 
 MASTER_IP = "127.0.0.1"
 MASTER_PORT = 9000
@@ -17,20 +11,19 @@ MASTER_PORT = 9000
 
 class RouterServer:
     """
-    ROUTEUR TOR (SAE)
+    ROUTEUR TOR (SAE 302)
     --------------------------------------
-    - génère ses clés RSA
-    - s’enregistre auprès du MASTER
-    - déchiffre UNE couche oignon
-    - renvoie vers le prochain routeur
-    - ou vers clientB (destinataire final)
+    - Génère ses clés RSA
+    - S’enregistre auprès du MASTER
+    - Déchiffre UNE couche d’oignon
+    - Transmet au prochain saut
+    - Ou envoie au client final (A ou B)
     """
 
-    def __init__(self, name, host, port, next_router=None):
+    def __init__(self, name, host, port):
         self.name = name
         self.host = host
         self.port = port
-        self.next_router = next_router
 
         # Génération des clés RSA
         rsa = RSAEncryption()
@@ -42,7 +35,21 @@ class RouterServer:
         self.register_to_master()
 
     # ============================================================
-    #     Enregistrement automatique auprès du MASTER
+    #  LIBÉRER LE PORT S’IL EST DÉJÀ UTILISÉ
+    # ============================================================
+    def free_port(self):
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                for conn in proc.net_connections(kind='inet'):
+                    if conn.laddr.port == self.port:
+                        print(f"[ROUTER {self.name}] ⚠ Port {self.port} occupé, arrêt PID {proc.pid}")
+                        proc.kill()
+                        return
+            except Exception:
+                continue
+
+    # ============================================================
+    #  ENREGISTREMENT AUPRÈS DU MASTER
     # ============================================================
     def register_to_master(self):
         try:
@@ -65,67 +72,65 @@ class RouterServer:
             print(f"[ROUTER {self.name}] ❌ ERREUR REGISTER: {e}")
 
     # ============================================================
-    #         LIBÉRATION AUTOMATIQUE DU PORT (WINDOWS)
-    # ============================================================
-    def free_port(self):
-        """Libère le port si déjà utilisé (évite WinError 10048)."""
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                for conn in proc.net_connections(kind="inet"):
-                    if conn.laddr.port == self.port:
-                        print(f"[ROUTER {self.name}] ⚠ Port {self.port} occupé, arrêt PID {proc.pid}")
-                        proc.kill()
-                        time.sleep(1)
-                        return
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-    # ============================================================
-    #                     DÉMARRAGE ROUTEUR
+    #  DÉMARRAGE DU ROUTEUR
     # ============================================================
     def start(self):
-        print(f"[ROUTER {self.name}] En écoute sur {self.host}:{self.port}")
-
-        # ⭐ libération automatique du port
         self.free_port()
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind((self.host, self.port))
-            server.listen()
+        print(f"[ROUTER {self.name}] En écoute sur {self.host}:{self.port}")
 
-            while True:
-                conn, addr = server.accept()
-                data = conn.recv(4096).decode()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((self.host, self.port))
+        server.listen()
 
-                print(f"[{self.name}] Couche reçue : {data[:80]}...")
+        while True:
+            conn, addr = server.accept()
+            data = conn.recv(4096).decode()
 
-                next_hop, payload = self.onion.process_onion_layer(
-                    data, self.private_key
-                )
+            print(f"[{self.name}] Couche reçue : {data[:80]}...")
 
-                print(f"[{self.name}] next_hop = {next_hop}")
+            next_hop, payload = self.onion.process_onion_layer(
+                data, self.private_key
+            )
 
-                # Dernier routeur → Client B
-                if next_hop == "clientB":
-                    print(f"[{self.name}] Envoi au destinataire final (clientB).")
-                    self.send_to_clientB(payload)
-                    conn.sendall(b"OK")
-                    conn.close()
-                    continue
+            print(f"[{self.name}] next_hop = {next_hop}")
 
-                # Transmission au routeur suivant
-                result = self.forward_to_next(next_hop, payload)
-                conn.sendall(result.encode())
+            # =============================
+            # DESTINATAIRES FINAUX
+            # =============================
+            if next_hop == "clientB":
+                print(f"[{self.name}] Envoi au destinataire final (clientB).")
+                self.send_to_clientB(payload)
+                conn.sendall(b"OK")
                 conn.close()
+                continue
+
+            if next_hop == "clientA":
+                print(f"[{self.name}] Envoi au destinataire final (clientA).")
+                self.send_to_clientA(payload)
+                conn.sendall(b"OK")
+                conn.close()
+                continue
+
+            # =============================
+            # ROUTEUR SUIVANT
+            # =============================
+            if next_hop is None:
+                print(f"[{self.name}] ❌ next_hop invalide, abandon.")
+                conn.close()
+                continue
+
+            result = self.forward_to_next(next_hop, payload)
+            conn.sendall(result.encode())
+            conn.close()
 
     # ============================================================
-    #       Transmission au routeur suivant
+    #  TRANSMISSION AU ROUTEUR SUIVANT
     # ============================================================
     def forward_to_next(self, next_name, payload):
-        port = 8000 + int(next_name.replace("router", ""))
-
         try:
+            port = 8000 + int(next_name.replace("router", ""))
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect(("127.0.0.1", port))
                 s.sendall(payload.encode())
@@ -135,27 +140,31 @@ class RouterServer:
             return f"[{self.name}] ERREUR : {e}"
 
     # ============================================================
-    #       Envoi au clientB (destinataire final)
+    #  ENVOI AUX CLIENTS FINAUX
     # ============================================================
     def send_to_clientB(self, msg):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect(("127.0.0.1", 9100))
             s.sendall(msg.encode())
 
+    def send_to_clientA(self, msg):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect(("127.0.0.1", 9001))
+            s.sendall(msg.encode())
 
-# =================================================================
-#   LANCEMENT AUTOMATIQUE PAR ARGUMENTS
-# =================================================================
+
+# ============================================================
+#  LANCEMENT DU ROUTEUR
+# ============================================================
 if __name__ == "__main__":
     """
-    Utilisation :
-        python router_server.py router1 127.0.0.1 8001
-        python router_server.py router3 127.0.0.1 8003
+    Usage :
+    python -m src.router.router_server router1 127.0.0.1 8001
     """
 
     name = sys.argv[1]
     host = sys.argv[2]
     port = int(sys.argv[3])
 
-    server = RouterServer(name, host, port)
-    server.start()
+    router = RouterServer(name, host, port)
+    router.start()
