@@ -1,136 +1,103 @@
 import socket
 import json
 import random
-import argparse
-import psutil
 from src.common.onion import OnionRouter
-
 
 MASTER_IP = "127.0.0.1"
 MASTER_PORT = 9000
+LISTEN_PORT = 9100
 
 
 class ClientB:
     """
-    CLIENT B (SAE 302)
-    --------------------------------------
-    - Peut RECEVOIR un message (listen)
-    - Peut ENVOYER un message (send)
-    - Utilise le même routage en oignon que Client A
+    Client B :
+    - peut recevoir un message via le réseau TOR
+    - peut envoyer un message vers Client A
     """
 
-    def __init__(self, host="127.0.0.1", port=9100):
-        self.host = host
-        self.port = port
+    def __init__(self):
         self.onion = OnionRouter()
 
-    # ============================================================
-    #  LIBÉRER LE PORT (Windows / Linux compatible)
-    # ============================================================
-    def free_port(self):
-        """Tue tout processus utilisant déjà le port."""
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                for conn in proc.net_connections(kind='inet'):
-                    if conn.laddr.port == self.port:
-                        proc.kill()
-                        return
-            except Exception:
-                continue
-
-    # ============================================================
-    #  MODE LISTEN : réception du message final
-    # ============================================================
-    def listen(self):
-        self.free_port()
-
-        print(f"[CLIENT B] Démarrage en mode LISTEN sur {self.host}:{self.port}")
-
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self.host, self.port))
-        server.listen()
-
-        print("[CLIENT B] En écoute...")
-
-        while True:
-            conn, addr = server.accept()
-            data = conn.recv(4096).decode()
-
-            print(f"\n📩 MESSAGE FINAL REÇU : {data}\n")
-
-            conn.sendall(b"OK")
-            conn.close()
-
-    # ============================================================
-    #  Récupération des routeurs depuis le MASTER
-    # ============================================================
+    # ===============================
+    # Récupération des routeurs
+    # ===============================
     def get_routers(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((MASTER_IP, MASTER_PORT))
             s.sendall(b"GET_ROUTERS")
             resp = s.recv(8192).decode()
-
         return json.loads(resp)
 
-    # ============================================================
-    #  Envoi du message au premier routeur
-    # ============================================================
-    def send_to_router(self, ip, port, msg):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((ip, port))
-            s.sendall(msg.encode())
-
-        print("[CLIENT B] Message envoyé au réseau TOR.")
-
-    # ============================================================
-    #  MODE SEND : envoi d’un message anonymisé
-    # ============================================================
-    def send(self):
-        message = input("Message à envoyer : ")
-
+    # ===============================
+    # Envoi du message
+    # ===============================
+    def send_message(self, message, debug=False):
         routers = self.get_routers()
-        print("[CLIENT B] Routeurs disponibles :", routers)
+
+        if debug:
+            print("[CLIENT B] Routeurs disponibles :", routers)
 
         selected = random.sample(routers, 3)
-        router_chain = [r["name"] for r in selected]
-        router_keys = {r["name"]: r["public_key"] for r in selected}
+        chain = [r["name"] for r in selected]
 
-        print("[CLIENT B] Chaîne choisie :", router_chain)
+        if debug:
+            print("[CLIENT B] Chaîne choisie :", chain)
+
+        keys = {r["name"]: r["public_key"] for r in selected}
 
         onion_msg = self.onion.create_onion_message(
-            message=message,
-            destination="clientA",
-            router_chain=router_chain,
-            router_public_keys=router_keys
+            message,
+            "clientA",
+            chain,
+            keys
         )
 
-        first_router = selected[0]
-        self.send_to_router(first_router["ip"], first_router["port"], onion_msg)
+        first = selected[0]
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((first["ip"], first["port"]))
+            s.sendall(onion_msg.encode())
+
+    # ===============================
+    # Réception
+    # ===============================
+    def listen(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("0.0.0.0", LISTEN_PORT))
+            s.listen()
+            print(f"[CLIENT B] En écoute sur {LISTEN_PORT}")
+
+            while True:
+                conn, _ = s.accept()
+                msg = conn.recv(4096).decode()
+                print(f"\n📩 MESSAGE FINAL REÇU : {msg}\n")
+                conn.close()
 
 
-# ============================================================
-#  POINT D’ENTRÉE (ARGPARSE PRO)
-# ============================================================
+# ======================================================
+# FONCTIONS PUBLIQUES (POUR GUI)
+# ======================================================
+def send_message(message):
+    ClientB().send_message(message)   # debug désactivé pour le GUI
+
+
+def listen():
+    ClientB().listen()
+
+
+# ======================================================
+# MODE CLI
+# ======================================================
 if __name__ == "__main__":
+    import sys
 
-    parser = argparse.ArgumentParser(
-        description="Client B - SAE 302 (envoi / réception via routage en oignon)"
-    )
-
-    parser.add_argument(
-        "--mode",
-        choices=["listen", "send"],
-        required=True,
-        help="Mode de fonctionnement du client"
-    )
-
-    args = parser.parse_args()
+    if len(sys.argv) != 2 or sys.argv[1] not in ["send", "listen"]:
+        print("Usage : python clientB.py send | listen")
+        sys.exit(1)
 
     client = ClientB()
 
-    if args.mode == "listen":
+    if sys.argv[1] == "send":
+        msg = input("Message à envoyer : ")
+        client.send_message(msg, debug=True)  # debug UNIQUEMENT en CLI
+    else:
         client.listen()
-    elif args.mode == "send":
-        client.send()
-
