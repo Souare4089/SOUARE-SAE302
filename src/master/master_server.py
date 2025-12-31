@@ -10,7 +10,7 @@ class MasterServer:
     MASTER SERVER (SAE 302)
     """
 
-    def __init__(self, host="127.0.0.1", port=9000):
+    def __init__(self, host="0.0.0.0", port=9000):
         self.host = host
         self.port = port
         self.db = DatabaseManager()

@@ -5,7 +5,7 @@ import psutil
 from src.common.crypto import RSAEncryption
 from src.common.onion import OnionRouter
 
-MASTER_IP = "127.0.0.1"
+MASTER_IP = "192.168.200.2"
 MASTER_PORT = 9000
 
 
